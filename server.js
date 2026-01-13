@@ -1,15 +1,14 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
-const fs = require('fs').promises;
-const path = require('path');
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-// Path to users database file
-const USERS_DB_PATH = path.join(__dirname, 'users.json');
+// In-memory database (works on Vercel/serverless)
+// Note: Data will be lost on server restart. For production, use MongoDB/PostgreSQL
+let usersDB = { users: [] };
 
 // KFintech API endpoints
 const KFINTECH_BASE_URL = 'https://ipostatus.kfintech.com';
@@ -214,18 +213,14 @@ app.post('/api/check-allotment', async (req, res) => {
   }
 });
 
-// Helper functions for user database
+// Helper functions for user database (in-memory storage)
+// Works on Vercel/serverless platforms with read-only file system
 async function readUsersDB() {
-  try {
-    const data = await fs.readFile(USERS_DB_PATH, 'utf8');
-    return JSON.parse(data);
-  } catch (error) {
-    return { users: [] };
-  }
+  return usersDB;
 }
 
 async function writeUsersDB(data) {
-  await fs.writeFile(USERS_DB_PATH, JSON.stringify(data, null, 2));
+  usersDB = data;
 }
 
 // Register new user
