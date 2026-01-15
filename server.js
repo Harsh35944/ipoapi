@@ -1,27 +1,91 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const fs = require('fs').promises;
+const path = require('path');
 const app = express();
 
 app.use(cors());
 app.use(express.json());
 
-// In-memory database (works on Vercel/serverless)
-// Note: Data will be lost on server restart. For production, use MongoDB/PostgreSQL
-let usersDB = { users: [] };
+// Path to users database file
+const USERS_DB_PATH = path.join(__dirname, 'users.json');
 
 // KFintech API endpoints
 const KFINTECH_BASE_URL = 'https://ipostatus.kfintech.com';
 const KFINTECH_API_URL = 'https://0uz601ms56.execute-api.ap-south-1.amazonaws.com/prod/api/query';
 const CLIENT_ID = '25353949930';
 
+// Cache for main.js filename to avoid fetching on every request
+let cachedMainJsFilename = null;
+let cacheTimestamp = null;
+const CACHE_DURATION = 60 * 60 * 1000; // 1 hour in milliseconds
+
+/**
+ * Fetch the current main.XXXXX.js filename from KFintech website
+ * by parsing the HTML to find the script tag
+ */
+async function getCurrentMainJsFilename() {
+  // Return cached value if still valid
+  if (cachedMainJsFilename && cacheTimestamp && (Date.now() - cacheTimestamp) < CACHE_DURATION) {
+    console.log(`Using cached main.js filename: ${cachedMainJsFilename}`);
+    return cachedMainJsFilename;
+  }
+
+  try {
+    console.log('Fetching current main.js filename from KFintech website...');
+    
+    // Fetch the HTML page
+    const htmlResponse = await axios.get(KFINTECH_BASE_URL, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-IN,en;q=0.9',
+        'Referer': KFINTECH_BASE_URL,
+      }
+    });
+
+    const html = htmlResponse.data;
+    
+    // Pattern to match: /static/js/main.XXXXX.js
+    // This regex looks for main. followed by alphanumeric hash, then .js
+    const mainJsPattern = /\/static\/js\/main\.([a-f0-9]+)\.js/g;
+    const match = mainJsPattern.exec(html);
+    
+    if (match && match[1]) {
+      const filename = `main.${match[1]}.js`;
+      cachedMainJsFilename = filename;
+      cacheTimestamp = Date.now();
+      console.log(`✅ Found current main.js filename: ${filename}`);
+      return filename;
+    } else {
+      // Fallback to default if pattern not found
+      console.log('⚠️ Could not find main.js pattern, using fallback');
+      return 'main.0ec4c140.js';
+    }
+  } catch (error) {
+    console.error('❌ Error fetching main.js filename:', error.message);
+    // Return cached value or fallback
+    if (cachedMainJsFilename) {
+      console.log(`Using cached filename: ${cachedMainJsFilename}`);
+      return cachedMainJsFilename;
+    }
+    return 'main.0ec4c140.js'; // Fallback
+  }
+}
+
 // Fetch list of companies with active IPOs from KFintech JS file
 app.get('/api/companies', async (req, res) => {
   try {
     console.log('Fetching companies from KFintech...');
     
+    // Get the current main.js filename dynamically
+    const mainJsFilename = await getCurrentMainJsFilename();
+    const jsFileUrl = `${KFINTECH_BASE_URL}/static/js/${mainJsFilename}`;
+    console.log(`Using JS file: ${jsFileUrl}`);
+    
     // Fetch the main JavaScript file that contains company data
-    const response = await axios.get(`${KFINTECH_BASE_URL}/static/js/main.0ec4c140.js`, {
+    const response = await axios.get(jsFileUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
         'Accept': '*/*',
@@ -213,14 +277,18 @@ app.post('/api/check-allotment', async (req, res) => {
   }
 });
 
-// Helper functions for user database (in-memory storage)
-// Works on Vercel/serverless platforms with read-only file system
+// Helper functions for user database
 async function readUsersDB() {
-  return usersDB;
+  try {
+    const data = await fs.readFile(USERS_DB_PATH, 'utf8');
+    return JSON.parse(data);
+  } catch (error) {
+    return { users: [] };
+  }
 }
 
 async function writeUsersDB(data) {
-  usersDB = data;
+  await fs.writeFile(USERS_DB_PATH, JSON.stringify(data, null, 2));
 }
 
 // Register new user
@@ -483,6 +551,25 @@ app.post('/api/check-allotment-bulk', async (req, res) => {
   }
 });
 
+// Endpoint to get current main.js filename (for debugging/monitoring)
+app.get('/api/main-js-filename', async (req, res) => {
+  try {
+    const filename = await getCurrentMainJsFilename();
+    res.json({
+      success: true,
+      filename: filename,
+      url: `${KFINTECH_BASE_URL}/static/js/${filename}`,
+      cached: cachedMainJsFilename === filename && (Date.now() - cacheTimestamp) < CACHE_DURATION
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get main.js filename',
+      error: error.message
+    });
+  }
+});
+
 const PORT = process.env.PORT || 5000;
 
 app.listen(PORT, () => {
@@ -490,4 +577,11 @@ app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`API endpoint: http://localhost:${PORT}`);
   console.log(`Status: Ready to accept requests\n`);
+  
+  // Pre-fetch the main.js filename on startup
+  getCurrentMainJsFilename().then(filename => {
+    console.log(`📦 Pre-loaded main.js filename: ${filename}\n`);
+  }).catch(err => {
+    console.log(`⚠️ Could not pre-load main.js filename: ${err.message}\n`);
+  });
 });
